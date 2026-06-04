@@ -153,6 +153,14 @@ header {
   text-align:center; font-weight:700;
   line-height:1.8;
 }
+.send-ng {
+  background:var(--warn-bg); border:1px solid var(--wrong);
+  border-radius:var(--radius-sm); padding:14px;
+  color:var(--wrong); font-size:.85rem;
+  text-align:center; font-weight:700;
+  line-height:1.8;
+}
+.send-ng small { font-weight:400; font-size:.78rem; color:#b02020; }
 .ghost-btn {
   width:100%; padding:11px;
   background:none; color:var(--text2);
@@ -162,6 +170,16 @@ header {
   font-family:inherit; transition:all .15s;
 }
 .ghost-btn:hover { border-color:var(--accent); color:var(--accent); }
+.retry-btn {
+  width:100%; padding:13px;
+  background:linear-gradient(135deg,#d93025,#a02020);
+  color:#fff; border:none;
+  border-radius:var(--radius-sm);
+  font-size:.95rem; font-weight:700;
+  cursor:pointer; font-family:inherit;
+  transition:opacity .15s;
+}
+.retry-btn:hover { opacity:.88; }
 
 /* ── 説明文 ── */
 .desc {
@@ -261,13 +279,17 @@ function getRadio(name) {
   return el ? el.value : '';
 }
 
-function doSend() {
-  const cls      = document.getElementById('inp-cls').value.trim();
-  const name     = document.getElementById('inp-name').value.trim();
-  const device   = getRadio('device');
-  const classroom= getRadio('classroom');
-  const browser  = getRadio('browser');
-  const err      = document.getElementById('inp-err');
+/* 送信パラメータをグローバルに保持（リトライ用） */
+let _sendParams = null;
+let _sendMeta   = null;
+
+async function doSend() {
+  const cls       = document.getElementById('inp-cls').value.trim();
+  const name      = document.getElementById('inp-name').value.trim();
+  const device    = getRadio('device');
+  const classroom = getRadio('classroom');
+  const browser   = getRadio('browser');
+  const err       = document.getElementById('inp-err');
 
   if (!cls || !name || !device || !classroom || !browser) {
     err.classList.add('show');
@@ -283,7 +305,8 @@ function doSend() {
   const ts  = `${now.getFullYear()}/${now.getMonth()+1}/${now.getDate()} `
              + `${now.getHours()}:${String(now.getMinutes()).padStart(2,'0')}`;
 
-  const params = {
+  _sendMeta = { cls, name, device, classroom, browser };
+  _sendParams = new URLSearchParams({
     timestamp:  ts,
     class:      cls,
     name:       name,
@@ -294,33 +317,37 @@ function doSend() {
     classroom:  classroom,
     browser:    browser,
     comment:    ''
-  };
-
-  const iframe = document.createElement('iframe');
-  iframe.name  = '_gas';
-  iframe.style.display = 'none';
-  document.body.appendChild(iframe);
-
-  const form  = document.createElement('form');
-  form.method = 'GET';
-  form.action = GAS_URL;
-  form.target = '_gas';
-
-  Object.entries(params).forEach(([k, v]) => {
-    const inp = document.createElement('input');
-    inp.type  = 'hidden';
-    inp.name  = k;
-    inp.value = v;
-    form.appendChild(inp);
   });
-  document.body.appendChild(form);
-  form.submit();
 
-  setTimeout(() => {
-    document.body.removeChild(form);
-    document.body.removeChild(iframe);
+  await trySend(btn, 1);
+}
+
+async function trySend(btn, attempt) {
+  const MAX_RETRY = 3;
+  try {
+    if (btn) {
+      btn.textContent = attempt === 1 ? '📤 送信中…' : `🔄 再送信中… (${attempt}/${MAX_RETRY})`;
+    }
+
+    await fetch(`${GAS_URL}?${_sendParams}`, {
+      method: 'GET',
+      mode:   'no-cors'   // CORSエラーを回避（opaqueレスポンス）
+    });
+
+    /* fetchが例外なく完了 → GASに到達したと判断 */
+    const { cls, name, device, classroom, browser } = _sendMeta;
     showResult(cls, name, device, classroom, browser);
-  }, 3000);
+
+  } catch (e) {
+    if (attempt < MAX_RETRY) {
+      /* 2秒待ってリトライ */
+      await new Promise(r => setTimeout(r, 2000));
+      await trySend(btn, attempt + 1);
+    } else {
+      /* 全リトライ失敗 */
+      showError();
+    }
+  }
 }
 
 function showResult(cls, name, device, classroom, browser) {
@@ -328,7 +355,7 @@ function showResult(cls, name, device, classroom, browser) {
   card.innerHTML = `
     <div class="form-badge">📤 動作確認用　送信テスト</div>
     <div class="send-ok">
-      ✓ 送信しました！<br>
+      ✅ 送信完了！<br>
       <small style="font-weight:400;font-size:.82rem;line-height:2">
         ${esc(cls)}　${esc(name)}<br>
         端末：${esc(device)}　／　Classroom：${esc(classroom)}<br>
@@ -337,6 +364,29 @@ function showResult(cls, name, device, classroom, browser) {
     </div>
     <button class="ghost-btn" onclick="location.reload()">← もう一度テストする</button>
   `;
+}
+
+function showError() {
+  const card = document.getElementById('main-card');
+  const { cls, name, device, classroom, browser } = _sendMeta;
+  card.innerHTML = `
+    <div class="form-badge">📤 動作確認用　送信テスト</div>
+    <div class="send-ng">
+      ❌ 送信に失敗しました<br>
+      <small>ネットワークに接続されているか確認して、もう一度お試しください。<br>
+      （3回試みましたが、いずれも届きませんでした）</small>
+    </div>
+    <button class="retry-btn" onclick="retryFromError()">🔄 もう一度送信する</button>
+    <button class="ghost-btn" onclick="location.reload()">← 最初からやり直す</button>
+  `;
+}
+
+async function retryFromError() {
+  const card = document.getElementById('main-card');
+  /* リトライボタンを無効化 */
+  const btn = card.querySelector('.retry-btn');
+  if (btn) { btn.disabled = true; btn.textContent = '🔄 送信中…'; }
+  await trySend(btn, 1);
 }
 
 function esc(s) {
